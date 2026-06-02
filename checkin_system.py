@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 import sqlite3
 from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence
 
@@ -333,24 +333,41 @@ class CheckInService:
         if cadence == "daily":
             period_count = (end_date - start_date).days + 1
         else:
-            start_year, start_week, _ = start_date.isocalendar()
-            end_year, end_week, _ = end_date.isocalendar()
-            period_count = (end_year - start_year) * 52 + (end_week - start_week) + 1
+            week_keys = set()
+            cursor = start_date
+            while cursor <= end_date:
+                week_keys.add(f"{cursor.isocalendar().year}-W{cursor.isocalendar().week:02d}")
+                cursor += timedelta(days=1)
+            period_count = len(week_keys)
         expected = period_count * len(player_ids)
 
+        start_dt = datetime.combine(start_date, time.min, tzinfo=timezone.utc).isoformat()
+        end_dt_exclusive = datetime.combine(
+            end_date + timedelta(days=1), time.min, tzinfo=timezone.utc
+        ).isoformat()
+        if not player_ids:
+            return {
+                "checkin_completion_rate": 0.0,
+                "goal_completion_trend": [],
+                "reading_adherence_trend": [],
+            }
+        player_placeholders = ",".join("?" for _ in player_ids)
+
         rows = self.conn.execute(
-            """
+            f"""
             SELECT period_key,
                    COUNT(*) AS total,
                    SUM(CASE WHEN goal_status = 'completed' THEN 1 ELSE 0 END) AS goal_completed,
                    SUM(CASE WHEN reading_status = 'done' THEN 1 ELSE 0 END) AS reading_done
             FROM check_ins
-            WHERE date(checkin_at) BETWEEN date(?) AND date(?)
+            WHERE checkin_at >= ?
+              AND checkin_at < ?
               AND cadence = ?
+              AND player_id IN ({player_placeholders})
             GROUP BY period_key
             ORDER BY period_key ASC
             """,
-            (start_date.isoformat(), end_date.isoformat(), cadence),
+            (start_dt, end_dt_exclusive, cadence, *player_ids),
         ).fetchall()
 
         actual = sum(row["total"] for row in rows)
